@@ -53,14 +53,30 @@ CMD_GET_RECORD_INFO     = 0x3c
 CMD_DOWNLOAD_RECORDS    = 0x40
 CMD_UPLOAD_RECORDS      = 0x41
 CMD_DOWNLOAD_STAFF_INFO = 0x42
-CMD_UPLOAD_STAFF_INFO   = 0x43
+CMD_UPLOAD_STAFF_INFO   = 0x13
+
+
+
+CMD_DOWNLOAD_STAFF_INFO_EXTENDED = 0x72
+CMD_UPLOAD_STAFF_INFO_EXTENDED   = 0x73
+
+
+
+CMD_DOWNLOAD_FP_TEMPLATE = 0x44
+CMD_UPLOAD_FP_TEMPLATE = 0x45
+
 
 CMD_GET_DEVICE_SN       = 0x46
 CMD_SET_DEVICE_SN       = 0x47
-CMD_GET_DEVICE_TYPE     = 0x48
-CMD_SET_DEVICE_TYPE     = 0x49
+CMD_GET_DEVICE_TYPE_CODE     = 0x48
+CMD_SET_DEVICE_TYPE_CODE     = 0x49
 
-CMD_CLEAR_RECORDS       = 0x4e
+CMD_ALL_RECORDS       = 0x00
+
+CMD_CLEAR_RECORDS       = 0x4E
+CMD_CLEAR_USERS       = 0x4D
+CMD_DELETE_DESIFNATED_USER      = 0x4C
+
 
 # crc16 bits
 _crc_table = (
@@ -120,6 +136,7 @@ def check_response(device_id, cmd, resp):
 
 NetParams = namedtuple("NetParams", "ip netmask mac gw server far com mode dhcp")
 RecordsInfo = namedtuple("RecordsInfo", "users fingerprints passwords cards all_records new_records")
+DeviceInformation = namedtuple ("DeviceInformation", "firmware passwd sleeptime volume lang dateformat att_state langflag cmdversion")
 
 #: bkp = 0: FP1, 1: FP2, 2: Password, 3: RFID Card
 #: type = 0: IN, 1: OUT
@@ -127,6 +144,7 @@ RecordsInfo = namedtuple("RecordsInfo", "users fingerprints passwords cards all_
 Record = namedtuple("Record", "code datetime bkp type work")
 
 StaffInfo = namedtuple("StaffInfo", "code pwd card name dep group mode fp special")
+StaffInfoExtended = namedtuple("StaffInfoExtended", "code pwd card name dep group mode fp pwd_8_digit keep special")
 
 def ip_format(it):
     return ".".join(str(i) for i in struct.unpack("BBBB", it))
@@ -185,8 +203,32 @@ def parse_s_info(data):
     group = ord(b_take(it, 1))
     mode = ord(b_take(it, 1))
     fp = struct.unpack("H", b_take(it, 2))[0]
-    special = ord(b_take(it, 1))
-    return StaffInfo(uid, pwd, card, name, dep, group, mode, fp, special)
+    special = b_take(it, 1)
+    return StaffInfo(uid, pwd, card, name, dep, group, mode ,keep, special)
+
+def parse_s_info_extended(data):
+    it = iter(data)
+    uid = struct.unpack(">Q", left_fill(b_take(it, 5), 8))[0]
+    pwd = b_take(it, 3)
+    if pwd == b'\xff\xff\xff':
+        pwd = None
+    else:
+        pwd = struct.unpack(">L", left_fill(pwd, 4))[0]
+    card = b_take(it, 3)
+    if card == b'\xff\xff\xff':
+        card = None
+    else:
+        card = struct.unpack(">L", left_fill(card, 4))[0]
+
+    name = b_take(it, 20)
+    dep = ord(b_take(it, 1))
+    group = ord(b_take(it, 1))
+    mode = ord(b_take(it, 1))
+    fp = struct.unpack("H", b_take(it, 2))[0]
+    pwd_8_digit = b_take(it, 1)
+    keep = b_take(it, 1)
+    special = b_take(it, 1)
+    return StaffInfoExtended(uid, pwd, card, name, dep, group, mode,fp,pwd_8_digit,keep, special)
 
 def parse_staff_info(data):
     data = bytearray(data)
@@ -194,6 +236,16 @@ def parse_staff_info(data):
     info = list()
     for sidata in split_every(27, data, bytearray):
         info.append(parse_s_info(sidata))
+    assert len(info) == valids
+    
+    return info
+
+def parse_staff_info_extended(data):
+    data = bytearray(data)
+    valids = data.pop(0)
+    info = list()
+    for sidata in split_every(40, data, bytearray):
+        info.append(parse_s_info_extended(sidata))
     assert len(info) == valids
     return info
 
@@ -210,6 +262,9 @@ class Device(object):
         self.ip_addr = ip_addr
         self.ip_port = ip_port
         self._s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        #to-do activar/desactivar unicode 
+        self.unicode =True
 
     def check_connected(self):
         if not self._connected:
@@ -233,9 +288,35 @@ class Device(object):
             raise DeviceException("Checksum error")
         return data
 
-    def get_information(self):
+    def get_device_information(self):
         data = self._get_response(CMD_GET_INFO)
-        return data
+        it = iter(data)
+        firmware = b_take(it,8).decode()
+        passwd = struct.unpack(">BH",left_fill(b_take(it,3),3))[0]
+        sleeptime = ord(b_take(it, 1))
+        volume = ord(b_take(it, 1))
+        lang = ord(b_take(it, 1))
+        dateformat = ord(b_take(it, 1))
+        att_state = ord(b_take(it, 1))
+        langflag = ord(b_take(it, 1))
+        cmdversion = ord(b_take(it, 1))
+
+        return DeviceInformation(firmware,passwd,sleeptime,volume,lang,dateformat,att_state,langflag,cmdversion)
+
+
+
+    def get_device_code(self):
+        data = self._get_response(CMD_GET_DEVICE_TYPE_CODE)
+        it = iter(data)
+        return struct.unpack(">Q",b_take(it,8))[0]
+
+
+    def get_device_sn(self):
+        data = self._get_response(CMD_GET_DEVICE_SN)
+        it = iter(data)
+        return struct.unpack(">L",b_take(it,4))[0]
+
+
 
     def get_datetime(self):
         data = self._get_response(CMD_GET_DATETIME)
@@ -314,6 +395,30 @@ class Device(object):
             left = left - q
         return staff
 
+    def download_staff_info_extended(self):
+        users = self.get_record_info().users
+        staff = list()
+        q = min([8, users])
+
+        data = self._get_response(CMD_DOWNLOAD_STAFF_INFO_EXTENDED, [1, q])
+        staff.extend(parse_staff_info_extended(data))
+        left = users - q
+        while left > 0:
+            q = min([8, left])
+            data = self._get_response(CMD_DOWNLOAD_STAFF_INFO_EXTENDED, [0, q])
+            staff.extend(parse_staff_info_extended(data))
+            left = left - q
+        return staff
+ 
+    def download_fp_template(self,user,code =1):
+        #args = [1, 1, 1, 1, 1]
+        #args = list(struct.pack(">L", user)[-3:])+[1]
+
+        res  = self._get_response(CMD_DOWNLOAD_FP_TEMPLATE,[000000000101])
+
+        print res
+
+
     def clear_records(self, amount=None):
         # Only clear new record marks
         if amount is None:
@@ -325,6 +430,10 @@ class Device(object):
         cancelled = struct.unpack(">L", left_fill(data, 4))[0]
         return cancelled
 
+    def clear_users(self):
+        data = self._get_response(CMD_CLEAR_USERS,[])
+        cancelled = struct.unpack(">L", left_fill(data, 4))[0]
+        return cancelled
 
 if __name__ == '__main__':
     clock = Device(device_id=98120327, ip_addr='192.168.1.30', ip_port=5010)
